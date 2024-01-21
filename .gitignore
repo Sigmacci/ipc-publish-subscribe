@@ -1,4 +1,9 @@
 server
 client
 
+database/
 .vscode/*
+qc
+qs
+a.out
+test.c
