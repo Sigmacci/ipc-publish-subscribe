@@ -9,7 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "mqipc.h"
+#include "inf155851_154978_mqipc.h"
 
 // Message Queue
 #define RESPONSE_QUEUE_SIZE 16
@@ -54,6 +54,9 @@ void dbInit() {
     fclose(keys);
 }
 
+/// @brief Checks if user exists.
+/// @param username Username.
+/// @return User cmsgid if user exists (including 0 when logged out), negative value of next id otherwise.
 int dbUserExists(char *username) {
     // open users database
     FILE *users = fopen(USERS_DB, "r");
@@ -164,6 +167,9 @@ void dbRemoveUser(int cmsgid) {
     }
 }
 
+/// @brief Checks if room exists.
+/// @param room_name Room name.
+/// @return Room id if room exists, negative value of next id otherwise.
 int dbRoomExists(char *room_name) {
     // open rooms database
     FILE *rooms = fopen(ROOMS_DB, "r");
@@ -202,7 +208,7 @@ int dbAddRoom(char *room_name) {
     return 0;
 }
 
-int dbEditRoom(int roomid, int cmsgid, int sub) {
+int dbEditRoom(int roomid, char *username, int sub) {
     // open keys database
     FILE *keys = fopen(KEYS_DB, "r");
     if (!keys) {
@@ -216,13 +222,14 @@ int dbEditRoom(int roomid, int cmsgid, int sub) {
         exit(1);
     }
     // read database line by line
-    int id, msgid, subscribtion, edit = 0;
-    while (fscanf(keys, "%d %d %d", &id, &msgid, &subscribtion) == 3) {
-        if (id == roomid && msgid == cmsgid) {
-            fprintf(temp, "%d %d %d\n", id, msgid, sub);
+    char usr[32];
+    int id, subscribtion, edit = 0;
+    while (fscanf(keys, "%d %s %d", &id, usr, &subscribtion) == 3) {
+        if (id == roomid && strcmp(usr, username) == 0) {
+            fprintf(temp, "%d %s %d\n", id, usr, sub);
             edit = 1;
         } else {
-            fprintf(temp, "%d %d %d\n", id, msgid, subscribtion);
+            fprintf(temp, "%d %s %d\n", id, usr, subscribtion);
         }
     }
     fclose(keys);
@@ -237,14 +244,14 @@ int dbEditRoom(int roomid, int cmsgid, int sub) {
     return 1;  // User is not in room
 }
 
-int dbJoinRoom(char *room_name, int cmsgid, int subscribtion) {
+int dbJoinRoom(char *room_name, char *username, int subscribtion) {
     // find room id
     int key = dbRoomExists(room_name);
     if (key < 0) {
         return 1;  // Room does not exist
     }
     // edit room if user is already in it
-    if (!dbEditRoom(key, cmsgid, subscribtion)) {
+    if (!dbEditRoom(key, username, subscribtion)) {
         return 2;  // User is in room
     }
     // open keys database
@@ -253,7 +260,7 @@ int dbJoinRoom(char *room_name, int cmsgid, int subscribtion) {
         printError("Failed to open keys database.");
         exit(1);
     }
-    fprintf(keys, "%d %d %d\n", key, cmsgid, subscribtion);
+    fprintf(keys, "%d %s %d\n", key, username, subscribtion);
     // close keys database
     fclose(keys);
     return 0;
@@ -289,6 +296,7 @@ int main(int argc, char const *argv[]) {
     msg_logout msg_temp_logout;
     msg_list_rooms msg_temp_list_rooms;
     msg_join_room msg_temp_join_room;
+    msg_send_message msg_temp_send_message;
     while (listen) {
         // check for logout messages
         if (msgrcv(msgid, &msg_temp_logout, sizeof(msg_temp_logout), M_LOGOUT, IPC_NOWAIT) != -1) {
@@ -350,7 +358,7 @@ int main(int argc, char const *argv[]) {
             }
             // read database line by line
             char name[32];
-            int id = 0, key = MQIPC_RESPONSE_TEXT_SIZE / 32;
+            int id = 0, key = MQIPC_MESSAGE_SIZE / 32;
             // define response
             msg_response response;
             response.status = M_SUCCESS;
@@ -364,7 +372,7 @@ int main(int argc, char const *argv[]) {
                     if (msgsnd(msg_temp_list_rooms.cmsgid, &response, sizeof(msg_response), IPC_NOWAIT) == -1) {
                         printError("Failed to send list rooms response.");
                     }
-                    key = MQIPC_RESPONSE_TEXT_SIZE / 32;
+                    key = MQIPC_MESSAGE_SIZE / 32;
                     strcpy(response.message, "");
                     continue;
                 }
@@ -381,7 +389,7 @@ int main(int argc, char const *argv[]) {
         // check for join room messages
         if (msgrcv(msgid, &msg_temp_join_room, sizeof(msg_temp_join_room), M_JOIN_ROOM, IPC_NOWAIT) != -1) {
             printf("Received join room message from user: #%d\n", msg_temp_join_room.cmsgid);
-            int id = dbJoinRoom(msg_temp_join_room.room_name, msg_temp_join_room.cmsgid, msg_temp_join_room.subscribtion);
+            int id = dbJoinRoom(msg_temp_join_room.room_name, msg_temp_join_room.username, msg_temp_join_room.subscribtion);
             msg_response response;
             switch (id) {
                 case 1:
@@ -403,6 +411,80 @@ int main(int argc, char const *argv[]) {
             printf("Sending response to: %d\n", msg_temp_join_room.cmsgid);
             if (msgsnd(msg_temp_join_room.cmsgid, &response, sizeof(msg_response), IPC_NOWAIT) == -1) {
                 printError("Failed to send join room response.");
+            }
+        }
+        // check for send message messages
+        if (msgrcv(msgid, &msg_temp_send_message, sizeof(msg_temp_send_message), M_SEND_MESSAGE, IPC_NOWAIT) != -1) {
+            printf("Received send message message from user: #%d\n", msg_temp_send_message.cmsgid);
+            // check if room exists
+            int roomid = dbRoomExists(msg_temp_send_message.room_name);
+            if (roomid < 0) {
+                msg_response response;
+                response.status = M_FAIL;
+                response.mtype = M_RESPONSE;
+                strcpy(response.message, "Room does not exist.");
+                printf("Sending response to: %d\n", msg_temp_send_message.cmsgid);
+                if (msgsnd(msg_temp_send_message.cmsgid, &response, sizeof(msg_response), IPC_NOWAIT) == -1) {
+                    printError("Failed to send send message response.");
+                }
+                continue;
+            }
+            // get room users
+            FILE *keys = fopen(KEYS_DB, "r");
+            if (!keys) {
+                printError("Failed to open keys database.");
+                exit(1);
+            }
+            FILE *temp = fopen(TEMP_DB, "w");
+            if (!temp) {
+                printError("Failed to open temp database.");
+                exit(1);
+            }
+            // read database line by line
+            char usr[32];
+            int id, subscribtion;
+            while (fscanf(keys, "%d %s %d", &id, usr, &subscribtion) == 3) {
+                if (id == roomid) {
+                    if (subscribtion != -1) {
+                        subscribtion--;
+                    }
+                    // check if still valid subscribtion
+                    if (subscribtion != 0) {
+                        fprintf(temp, "%d %s %d\n", id, usr, subscribtion);
+                        // get user cmsgid
+                        int cmsgid = dbUserExists(usr);
+                        if (cmsgid > 0) {
+                            // broadcast the message to users
+                            printf("Sending message to: %d\n", cmsgid);
+                            msg_send_message usermsg;
+                            usermsg.mtype = msg_temp_send_message.priority;
+                            strcpy(usermsg.author, msg_temp_send_message.author);
+                            strcpy(usermsg.room_name, msg_temp_send_message.room_name);
+                            strcpy(usermsg.message, msg_temp_send_message.message);
+                            usermsg.cmsgid = 0;
+                            if (msgsnd(cmsgid, &usermsg, sizeof(msg_send_message), IPC_NOWAIT) == -1) {
+                                printError("Failed to send message.");
+                            }
+                        }
+                    }
+                } else {
+                    fprintf(temp, "%d %s %d\n", id, usr, subscribtion);
+                }
+            }
+            fclose(keys);
+            fclose(temp);
+            // remove keys database
+            remove(KEYS_DB);
+            // rename temp database
+            rename(TEMP_DB, KEYS_DB);
+            // response with success
+            msg_response response;
+            response.status = M_SUCCESS;
+            response.mtype = M_RESPONSE;
+            strcpy(response.message, "Message sent.");
+            printf("Sending response to: %d\n", msg_temp_send_message.cmsgid);
+            if (msgsnd(msg_temp_send_message.cmsgid, &response, sizeof(msg_response), IPC_NOWAIT) == -1) {
+                printError("Failed to send send message response.");
             }
         }
     }
